@@ -1,6 +1,24 @@
+# 🆔 Aadhaar Biometric Update Monitor
+
+An interactive, real-time dashboard built with **Python** and **Streamlit** to monitor Aadhaar biometric re-validation trends across India.
+
+## 🌟 Overview
+This project visualizes aggregated biometric update data, focusing on mandatory transitions (children to adults) and modality preferences (Fingerprint, Iris, Face). It is designed for policy makers and health officials to track identity infrastructure health.
+
+## ✨ Key Features
+* **Real-time KPIs:** Monitor total updates, child-to-adult transitions, and district-level activity.
+* **Modality Analysis:** Compare the usage of Fingerprints vs. Iris vs. Facial recognition.
+* **Age-Band Monitoring:** Track "Mandatory Biometric Updates" (MBU) for children aged 5 and 15.
+* **Interactive Filters:** Drill down by State, District, Modality, and Date range.
+
+## 🚀 Installation & Setup
+1. **Clone the repo:**
+   ```bash
+   git clone [https://github.com/your-username/AadhaarPulse.git](https://github.com/your-username/AadhaarPulse.git)
+   cd AadhaarPulse
 MIT License
 
-Copyright (c) 2026 [Your Name]
+Copyright (c) 2026 [Abhilasha Thakare]
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
