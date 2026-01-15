@@ -7,63 +7,65 @@ import streamlit as st
 
 
 # ---------- CONFIG ----------
+# Default file in your repo
+DATA_PATH = "data/biometric_updates.csv"
 
-DATA_PATH = "data/biometric_updates.csv"          # your Aadhaar demographic CSV
-CENTROIDS_PATH = "data/india_states_centroid.csv" # state -> lat/lon CSV
+# SET THESE NAMES TO MATCH YOUR CSV HEADER (after lowercasing)
+DATE_COL = "date"            # column that has dates
+STATE_COL = "state"          # column with state names (or leave as "" if none)
+DISTRICT_COL = "district"    # column with district names (or leave as "" if none)
+VALUE_COL = "demo_age_5_17"  # numeric column you want to chart (e.g. demo_age_5_17)
 
 
 # ---------- DATA LOADING ----------
 
 @st.cache_data(ttl=300)
 def load_data(path_or_buffer) -> pd.DataFrame:
-    """
-    Load Aadhaar demographic data and do basic cleaning.
-
-    Expected columns (case-insensitive, will be lowercased):
-      - date
-      - state
-      - district
-      - pincode
-      - demo_age_5_17
-      - demo_age_17_
-    """
     df = pd.read_csv(path_or_buffer)
 
-    # Normalize column names
+    # normalize column names
     df.columns = [c.strip().lower() for c in df.columns]
 
-    required = ["date", "state", "district", "pincode",
-                "demo_age_5_17", "demo_age_17_"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        st.error(f"Missing columns in CSV: {missing}")
+    # show columns in sidebar so you can debug
+    st.sidebar.write("Detected columns:", list(df.columns))
+
+    # basic checks
+    if DATE_COL.lower() not in df.columns:
+        st.error(f"DATE_COL '{DATE_COL}' not found in CSV.")
         return pd.DataFrame()
 
-    # Parse date
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    if VALUE_COL.lower() not in df.columns:
+        st.error(f"VALUE_COL '{VALUE_COL}' not found in CSV.")
+        return pd.DataFrame()
+
+    df["date"] = pd.to_datetime(df[DATE_COL.lower()], errors="coerce")
     df = df.dropna(subset=["date"])
 
-    # Total “updates” = children + 17+
-    df["updates_count"] = (
-        pd.to_numeric(df["demo_age_5_17"], errors="coerce").fillna(0)
-        + pd.to_numeric(df["demo_age_17_"], errors="coerce").fillna(0)
-    )
+    df["metric"] = pd.to_numeric(df[VALUE_COL.lower()], errors="coerce").fillna(0)
+
+    # optional columns
+    if STATE_COL and STATE_COL.lower() in df.columns:
+        df["state"] = df[STATE_COL.lower()].astype(str)
+    else:
+        df["state"] = "All"
+
+    if DISTRICT_COL and DISTRICT_COL.lower() in df.columns:
+        df["district"] = df[DISTRICT_COL.lower()].astype(str)
+    else:
+        df["district"] = "All"
 
     return df
 
 
-# ---------- HELPERS (FILTERS + CHARTS) ----------
+# ---------- HELPERS ----------
 
-def filter_data(df: pd.DataFrame,
-                state: str,
-                district: str,
-                date_range) -> pd.DataFrame:
+def filter_data(df: pd.DataFrame, state: str, district: str, date_range):
     start_date, end_date = date_range
     mask = (df["date"] >= start_date) & (df["date"] <= end_date)
 
-    if state != "All":
+    if "state" in df.columns and state != "All":
         mask &= df["state"] == state
-    if district != "All":
+    if "district" in df.columns and district != "All":
         mask &= df["district"] == district
 
     return df[mask]
@@ -74,145 +76,70 @@ def kpi_block(df: pd.DataFrame):
         st.warning("No data for selected filters.")
         return
 
-    total_updates = int(df["updates_count"].sum())
-
+    total_val = float(df["metric"].sum())
     today = df["date"].max()
     yesterday = today - timedelta(days=1)
 
-    today_updates = int(df.loc[df["date"] == today, "updates_count"].sum())
-    yesterday_updates = int(df.loc[df["date"] == yesterday, "updates_count"].sum())
+    today_val = float(df.loc[df["date"] == today, "metric"].sum())
+    yesterday_val = float(df.loc[df["date"] == yesterday, "metric"].sum())
 
     col1, col2 = st.columns(2)
-    col1.metric("Total updates", f"{total_updates:,}")
-    col2.metric(
-        "Updates today",
-        f"{today_updates:,}",
-        delta=today_updates - yesterday_updates,
-    )
+    col1.metric("Total value", f"{total_val:,.0f}")
+    col2.metric("Today", f"{today_val:,.0f}", delta=today_val - yesterday_val)
 
 
 def time_series_chart(df: pd.DataFrame):
     if df.empty:
         return
-    daily = df.groupby("date", as_index=False)["updates_count"].sum()
-    fig = px.line(
-        daily,
-        x="date",
-        y="updates_count",
-        title="Updates over time (all age bands)",
-    )
+    daily = df.groupby("date", as_index=False)["metric"].sum()
+    fig = px.line(daily, x="date", y="metric", title="Metric over time")
     st.plotly_chart(fig, use_container_width=True)
 
 
 def state_bar_chart(df: pd.DataFrame):
-    if df.empty:
+    if df.empty or "state" not in df.columns:
         return
     s = (
-        df.groupby("state", as_index=False)["updates_count"]
+        df.groupby("state", as_index=False)["metric"]
         .sum()
-        .sort_values("updates_count", ascending=False)
+        .sort_values("metric", ascending=False)
         .head(10)
     )
-    fig = px.bar(
-        s,
-        x="state",
-        y="updates_count",
-        title="Top 10 states by updates",
-    )
+    fig = px.bar(s, x="state", y="metric", title="Top 10 states")
     st.plotly_chart(fig, use_container_width=True)
 
 
 def district_bar_chart(df: pd.DataFrame):
-    if df.empty:
+    if df.empty or "district" not in df.columns:
         return
     d = (
-        df.groupby("district", as_index=False)["updates_count"]
+        df.groupby("district", as_index=False)["metric"]
         .sum()
-        .sort_values("updates_count", ascending=False)
+        .sort_values("metric", ascending=False)
         .head(10)
     )
-    fig = px.bar(
-        d,
-        x="district",
-        y="updates_count",
-        title="Top 10 districts by updates",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def state_map(df: pd.DataFrame):
-    """
-    Bubble heat map of India using state centroids and update counts.
-    Requires data/india_states_centroid.csv with columns: state,lat,lon.
-    """
-    if df.empty:
-        return
-
-    if not os.path.exists(CENTROIDS_PATH):
-        st.info(
-            "State centroid file not found: data/india_states_centroid.csv. "
-            "Add it to enable the map view."
-        )
-        return
-
-    # aggregate by state
-    s = (
-        df.groupby("state", as_index=False)["updates_count"]
-        .sum()
-        .sort_values("updates_count", ascending=False)
-    )
-
-    cent = pd.read_csv(CENTROIDS_PATH)
-    cent.columns = [c.strip().lower() for c in cent.columns]
-
-    merged = pd.merge(s, cent, on="state", how="inner")
-
-    if merged.empty:
-        st.info("No matching states between data and centroid file for map.")
-        return
-
-    fig = px.scatter_mapbox(
-        merged,
-        lat="lat",
-        lon="lon",
-        size="updates_count",
-        color="updates_count",
-        hover_name="state",
-        zoom=3.8,
-        mapbox_style="carto-positron",
-        title="Update intensity by state (bubble map)",
-    )
+    fig = px.bar(d, x="district", y="metric", title="Top 10 districts")
     st.plotly_chart(fig, use_container_width=True)
 
 
 # ---------- STREAMLIT APP ----------
 
-st.set_page_config(
-    page_title="Aadhaar Biometric/Demographic Update Monitor",
-    layout="wide",
-)
+st.set_page_config(page_title="Aadhaar Real-time Monitor", layout="wide")
 
-st.title("Aadhaar Biometric/Demographic Update Monitor")
-st.caption(
-    "Dashboard using Aadhaar age-band counts to approximate update intensity "
-    "across states and districts, with an India heat map."
-)
+st.title("Aadhaar Real-time Monitor")
+st.caption("Dashboard built from your Aadhaar aggregate CSV (flexible columns).")
 
-
-# --- Data source + uploader ---
-
-st.sidebar.header("Data & filters")
+st.sidebar.header("Data")
 
 if not os.path.exists(DATA_PATH):
     st.sidebar.warning(
         f"Default data file not found: {DATA_PATH}. "
-        "Upload a CSV using the uploader below."
+        "Upload a CSV/TXT using the uploader below."
     )
 
 uploaded = st.sidebar.file_uploader(
-    "Upload latest CSV (optional)",
-    type=["csv"],
-    help="Upload a fresh export to instantly refresh charts.",
+    "Upload CSV/TXT", type=["csv", "txt"],
+    help="Upload your Aadhaar aggregate file exported as CSV or TXT."
 )
 
 if uploaded is not None:
@@ -223,14 +150,7 @@ else:
     df_raw = pd.DataFrame()
 
 if df_raw.empty:
-    st.error(
-        "Dataset is empty or could not be loaded. "
-        "CSV must have: date, state, district, pincode, demo_age_5_17, demo_age_17_."
-    )
     st.stop()
-
-
-# --- Sidebar filters ---
 
 min_date = df_raw["date"].min()
 max_date = df_raw["date"].max()
@@ -260,9 +180,6 @@ df = filter_data(
     date_range=(pd.to_datetime(start_date), pd.to_datetime(end_date)),
 )
 
-
-# --- Layout ---
-
 kpi_block(df)
 
 col_left, col_right = st.columns([2, 1])
@@ -274,13 +191,10 @@ with col_left:
 with col_right:
     district_bar_chart(df)
 
-st.subheader("Geographic view")
-state_map(df)
-
 st.subheader("Filtered data (preview)")
 st.dataframe(df.head(200))
 
 st.caption(
-    "Upload a fresh CSV or change filters to show near real-time changes "
-    "in Aadhaar-related update activity for your hackathon demo."
+    "If something looks wrong, open data/biometric_updates.csv on GitHub, "
+    "see the column names, and update DATE_COL / VALUE_COL at the top."
 )
