@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -8,28 +8,51 @@ import streamlit as st
 
 # ---------- CONFIG ----------
 
-DATA_PATH = "data/biometric_updates.csv"  # adjust if needed
+DATA_PATH = "data/biometric_updates.csv"  # default local file
+
+# Change this to your real count column name from the CSV (lowercase):
+# e.g. "count", "biometricupdate", "no_of_updates"
+ORIGINAL_COUNT_COL = "count"
 
 
 # ---------- DATA LOADING ----------
 
 @st.cache_data(ttl=300)
-def load_data(path: str) -> pd.DataFrame:
+def load_data(path_or_buffer) -> pd.DataFrame:
     """
     Load Aadhaar biometric update data and do basic cleaning.
-    Cached for 5 minutes to simulate 'near real-time' refresh.
+    Works for both local file path and uploaded file.
     """
-    df = pd.read_csv(path)
+    df = pd.read_csv(path_or_buffer)
 
-    # Standardize column names (lowercase) if needed
+    # Standardize column names (lowercase, no extra spaces)
     df.columns = [c.strip().lower() for c in df.columns]
 
-    # Expect columns: date, state, district, age_group, modality, updates_count
+    # Ensure the chosen count column exists
+    if ORIGINAL_COUNT_COL.lower() not in df.columns:
+        st.error(
+            f"Configured count column '{ORIGINAL_COUNT_COL}' not found in CSV. "
+            f"Available columns: {list(df.columns)}"
+        )
+        return pd.DataFrame()
+
+    # Expect: date, state, district, age_group, modality, <count>
+    if "date" not in df.columns:
+        st.error("CSV must contain a 'date' column.")
+        return pd.DataFrame()
+
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
 
-    # Ensure numeric
-    df["updates_count"] = pd.to_numeric(df["updates_count"], errors="coerce").fillna(0)
+    # Create unified 'updates_count' column from your original column
+    df["updates_count"] = pd.to_numeric(
+        df[ORIGINAL_COUNT_COL.lower()], errors="coerce"
+    ).fillna(0)
+
+    # Fill missing dimension columns if absent
+    for col in ["state", "district", "age_group", "modality"]:
+        if col not in df.columns:
+            df[col] = "Unknown"
 
     return df
 
@@ -42,9 +65,7 @@ def filter_data(df: pd.DataFrame,
                 age_group: str,
                 modality: str,
                 date_range) -> pd.DataFrame:
-    """Apply sidebar filters to dataframe."""
     start_date, end_date = date_range
-
     mask = (df["date"] >= start_date) & (df["date"] <= end_date)
 
     if state != "All":
@@ -60,7 +81,6 @@ def filter_data(df: pd.DataFrame,
 
 
 def kpi_block(df: pd.DataFrame):
-    """Show main KPIs: total, today, children vs adults share."""
     if df.empty:
         st.warning("No data for selected filters.")
         return
@@ -73,21 +93,28 @@ def kpi_block(df: pd.DataFrame):
     today_updates = int(df.loc[df["date"] == today, "updates_count"].sum())
     yesterday_updates = int(df.loc[df["date"] == yesterday, "updates_count"].sum())
 
-    # Simple children vs adults split: age_group containing 'child' or numeric bands
-    children_mask = df["age_group"].str.contains("0-5|5-15|child", case=False, regex=True)
+    # Simple children vs adults heuristic
+    children_mask = df["age_group"].astype(str).str.contains(
+        "0-5|5-15|child", case=False, regex=True
+    )
     children_updates = int(df.loc[children_mask, "updates_count"].sum())
     adult_updates = total_updates - children_updates
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Total updates", f"{total_updates:,}")
-    col2.metric("Updates today", f"{today_updates:,}", delta=today_updates - yesterday_updates)
-    col3.metric("Children vs adults",
-                f"{children_updates:,} / {adult_updates:,}",
-                help="Children (0‑15) vs adults (others)")
+    col2.metric(
+        "Updates today",
+        f"{today_updates:,}",
+        delta=today_updates - yesterday_updates,
+    )
+    col3.metric(
+        "Children vs adults",
+        f"{children_updates:,} / {adult_updates:,}",
+        help="Children (0‑15) vs adults (others)",
+    )
 
 
 def time_series_chart(df: pd.DataFrame):
-    """Line chart of updates over time by modality."""
     if df.empty:
         return
     daily = df.groupby(["date", "modality"], as_index=False)["updates_count"].sum()
@@ -102,13 +129,14 @@ def time_series_chart(df: pd.DataFrame):
 
 
 def state_bar_chart(df: pd.DataFrame):
-    """Bar chart: top states by updates."""
     if df.empty:
         return
-    s = (df.groupby("state", as_index=False)["updates_count"]
-          .sum()
-          .sort_values("updates_count", ascending=False)
-          .head(10))
+    s = (
+        df.groupby("state", as_index=False)["updates_count"]
+        .sum()
+        .sort_values("updates_count", ascending=False)
+        .head(10)
+    )
     fig = px.bar(
         s,
         x="state",
@@ -119,7 +147,6 @@ def state_bar_chart(df: pd.DataFrame):
 
 
 def modality_pie_chart(df: pd.DataFrame):
-    """Pie chart of modality share."""
     if df.empty:
         return
     m = df.groupby("modality", as_index=False)["updates_count"].sum()
@@ -146,29 +173,34 @@ st.caption(
     "(fingerprint, iris, face) across states, districts, and age groups."
 )
 
-# --- Data source + uploader (for 'real-time' feel) ---
+# --- Data source + uploader ---
 
 st.sidebar.header("Data & filters")
 
-data_file = DATA_PATH
 if not os.path.exists(DATA_PATH):
-    st.sidebar.error(f"Default data file not found: {DATA_PATH}")
-else:
-    st.sidebar.success(f"Using data file: {DATA_PATH}")
+    st.sidebar.warning(
+        f"Default data file not found: {DATA_PATH}. "
+        "You can upload a CSV using the uploader below."
+    )
 
 uploaded = st.sidebar.file_uploader(
     "Upload latest biometric update CSV (optional)",
     type=["csv"],
-    help="Upload a fresh export to instantly refresh charts."
+    help="Upload a fresh export to instantly refresh charts.",
 )
 
 if uploaded is not None:
     df_raw = load_data(uploaded)
+elif os.path.exists(DATA_PATH):
+    df_raw = load_data(DATA_PATH)
 else:
-    df_raw = load_data(data_file)
+    df_raw = pd.DataFrame()
 
 if df_raw.empty:
-    st.error("Dataset is empty or could not be loaded. Check your CSV format.")
+    st.error(
+        "Dataset is empty or could not be loaded. "
+        "Check your CSV and ORIGINAL_COUNT_COL in app.py."
+    )
     st.stop()
 
 # --- Sidebar filters ---
@@ -224,6 +256,6 @@ st.subheader("Filtered data (preview)")
 st.dataframe(df.head(200))
 
 st.caption(
-    "Tip: For hackathons, demonstrate how uploading a fresh CSV or changing filters "
-    "updates the analytics in near real time."
+    "Tip: Upload a fresh CSV or change filters to show near real-time changes "
+    "in Aadhaar biometric updates during your hackathon demo."
 )
