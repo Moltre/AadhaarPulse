@@ -8,11 +8,7 @@ import streamlit as st
 
 # ---------- CONFIG ----------
 
-DATA_PATH = "data/biometric_updates.csv"  # default local file
-
-# Change this to your real count column name from the CSV (lowercase):
-# e.g. "count", "biometricupdate", "no_of_updates"
-ORIGINAL_COUNT_COL = "count"
+DATA_PATH = "data/biometric_updates.csv"  # put your CSV here
 
 
 # ---------- DATA LOADING ----------
@@ -20,39 +16,40 @@ ORIGINAL_COUNT_COL = "count"
 @st.cache_data(ttl=300)
 def load_data(path_or_buffer) -> pd.DataFrame:
     """
-    Load Aadhaar biometric update data and do basic cleaning.
-    Works for both local file path and uploaded file.
+    Load Aadhaar demographic/biometric-update-style data and do basic cleaning.
+    Expected columns (lowercased):
+      - date
+      - state
+      - district
+      - pincode
+      - demo_age_5_17
+      - demo_age_17_
     """
     df = pd.read_csv(path_or_buffer)
 
-    # Standardize column names (lowercase, no extra spaces)
+    # Normalize column names
     df.columns = [c.strip().lower() for c in df.columns]
 
-    # Ensure the chosen count column exists
-    if ORIGINAL_COUNT_COL.lower() not in df.columns:
-        st.error(
-            f"Configured count column '{ORIGINAL_COUNT_COL}' not found in CSV. "
-            f"Available columns: {list(df.columns)}"
-        )
+    required = ["date", "state", "district", "pincode",
+                "demo_age_5_17", "demo_age_17_"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"Missing columns in CSV: {missing}")
         return pd.DataFrame()
 
-    # Expect: date, state, district, age_group, modality, <count>
-    if "date" not in df.columns:
-        st.error("CSV must contain a 'date' column.")
-        return pd.DataFrame()
-
+    # Parse date
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
 
-    # Create unified 'updates_count' column from your original column
-    df["updates_count"] = pd.to_numeric(
-        df[ORIGINAL_COUNT_COL.lower()], errors="coerce"
-    ).fillna(0)
+    # Total “updates” = children + 17+
+    df["updates_count"] = (
+        pd.to_numeric(df["demo_age_5_17"], errors="coerce").fillna(0)
+        + pd.to_numeric(df["demo_age_17_"], errors="coerce").fillna(0)
+    )
 
-    # Fill missing dimension columns if absent
-    for col in ["state", "district", "age_group", "modality"]:
-        if col not in df.columns:
-            df[col] = "Unknown"
+    # Very simple derived dimensions for filters
+    df["age_group"] = "all"      # you can later split rows by age band
+    df["modality"] = "all"       # dataset is demographic, keep one category
 
     return df
 
@@ -62,8 +59,6 @@ def load_data(path_or_buffer) -> pd.DataFrame:
 def filter_data(df: pd.DataFrame,
                 state: str,
                 district: str,
-                age_group: str,
-                modality: str,
                 date_range) -> pd.DataFrame:
     start_date, end_date = date_range
     mask = (df["date"] >= start_date) & (df["date"] <= end_date)
@@ -72,10 +67,6 @@ def filter_data(df: pd.DataFrame,
         mask &= df["state"] == state
     if district != "All":
         mask &= df["district"] == district
-    if age_group != "All":
-        mask &= df["age_group"] == age_group
-    if modality != "All":
-        mask &= df["modality"] == modality
 
     return df[mask]
 
@@ -93,37 +84,24 @@ def kpi_block(df: pd.DataFrame):
     today_updates = int(df.loc[df["date"] == today, "updates_count"].sum())
     yesterday_updates = int(df.loc[df["date"] == yesterday, "updates_count"].sum())
 
-    # Simple children vs adults heuristic
-    children_mask = df["age_group"].astype(str).str.contains(
-        "0-5|5-15|child", case=False, regex=True
-    )
-    children_updates = int(df.loc[children_mask, "updates_count"].sum())
-    adult_updates = total_updates - children_updates
-
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     col1.metric("Total updates", f"{total_updates:,}")
     col2.metric(
         "Updates today",
         f"{today_updates:,}",
         delta=today_updates - yesterday_updates,
     )
-    col3.metric(
-        "Children vs adults",
-        f"{children_updates:,} / {adult_updates:,}",
-        help="Children (0‑15) vs adults (others)",
-    )
 
 
 def time_series_chart(df: pd.DataFrame):
     if df.empty:
         return
-    daily = df.groupby(["date", "modality"], as_index=False)["updates_count"].sum()
+    daily = df.groupby("date", as_index=False)["updates_count"].sum()
     fig = px.line(
         daily,
         x="date",
         y="updates_count",
-        color="modality",
-        title="Biometric updates over time by modality",
+        title="Updates over time (all modalities, all ages)",
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -141,21 +119,25 @@ def state_bar_chart(df: pd.DataFrame):
         s,
         x="state",
         y="updates_count",
-        title="Top 10 states by biometric updates",
+        title="Top 10 states by updates",
     )
     st.plotly_chart(fig, use_container_width=True)
 
 
-def modality_pie_chart(df: pd.DataFrame):
+def district_bar_chart(df: pd.DataFrame):
     if df.empty:
         return
-    m = df.groupby("modality", as_index=False)["updates_count"].sum()
-    fig = px.pie(
-        m,
-        names="modality",
-        values="updates_count",
-        title="Share of updates by biometric modality",
-        hole=0.4,
+    d = (
+        df.groupby("district", as_index=False)["updates_count"]
+        .sum()
+        .sort_values("updates_count", ascending=False)
+        .head(10)
+    )
+    fig = px.bar(
+        d,
+        x="district",
+        y="updates_count",
+        title="Top 10 districts by updates",
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -163,15 +145,16 @@ def modality_pie_chart(df: pd.DataFrame):
 # ---------- STREAMLIT APP ----------
 
 st.set_page_config(
-    page_title="Aadhaar Biometric Update Monitor",
+    page_title="Aadhaar Biometric/Demographic Update Monitor",
     layout="wide",
 )
 
-st.title("Aadhaar Biometric Update Monitor")
+st.title("Aadhaar Biometric/Demographic Update Monitor")
 st.caption(
-    "Real‑time style dashboard of Aadhaar biometric updates "
-    "(fingerprint, iris, face) across states, districts, and age groups."
+    "Dashboard using Aadhaar demographic age-band counts to approximate "
+    "biometric update intensity across states and districts."
 )
+
 
 # --- Data source + uploader ---
 
@@ -180,11 +163,11 @@ st.sidebar.header("Data & filters")
 if not os.path.exists(DATA_PATH):
     st.sidebar.warning(
         f"Default data file not found: {DATA_PATH}. "
-        "You can upload a CSV using the uploader below."
+        "Upload a CSV using the uploader below."
     )
 
 uploaded = st.sidebar.file_uploader(
-    "Upload latest biometric update CSV (optional)",
+    "Upload latest CSV (optional)",
     type=["csv"],
     help="Upload a fresh export to instantly refresh charts.",
 )
@@ -199,9 +182,11 @@ else:
 if df_raw.empty:
     st.error(
         "Dataset is empty or could not be loaded. "
-        "Check your CSV and ORIGINAL_COUNT_COL in app.py."
+        "Check that the CSV has columns: date, state, district, pincode, "
+        "demo_age_5_17, demo_age_17_."
     )
     st.stop()
+
 
 # --- Sidebar filters ---
 
@@ -210,13 +195,9 @@ max_date = df_raw["date"].max()
 
 state_options = ["All"] + sorted(df_raw["state"].dropna().unique().tolist())
 district_options = ["All"] + sorted(df_raw["district"].dropna().unique().tolist())
-age_group_options = ["All"] + sorted(df_raw["age_group"].dropna().unique().tolist())
-modality_options = ["All"] + sorted(df_raw["modality"].dropna().unique().tolist())
 
 state = st.sidebar.selectbox("State", state_options)
 district = st.sidebar.selectbox("District", district_options)
-age_group = st.sidebar.selectbox("Age group", age_group_options)
-modality = st.sidebar.selectbox("Biometric modality", modality_options)
 
 date_range = st.sidebar.date_input(
     "Date range",
@@ -234,10 +215,9 @@ df = filter_data(
     df_raw,
     state=state,
     district=district,
-    age_group=age_group,
-    modality=modality,
     date_range=(pd.to_datetime(start_date), pd.to_datetime(end_date)),
 )
+
 
 # --- Layout ---
 
@@ -250,12 +230,12 @@ with col_left:
     state_bar_chart(df)
 
 with col_right:
-    modality_pie_chart(df)
+    district_bar_chart(df)
 
 st.subheader("Filtered data (preview)")
 st.dataframe(df.head(200))
 
 st.caption(
-    "Tip: Upload a fresh CSV or change filters to show near real-time changes "
-    "in Aadhaar biometric updates during your hackathon demo."
+    "Upload a fresh CSV or change filters to show near real-time changes "
+    "in Aadhaar-related update activity for your hackathon demo."
 )
