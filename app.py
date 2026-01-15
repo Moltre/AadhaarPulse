@@ -8,7 +8,8 @@ import streamlit as st
 
 # ---------- CONFIG ----------
 
-DATA_PATH = "data/biometric_updates.csv"  # put your CSV here
+DATA_PATH = "data/biometric_updates.csv"          # your Aadhaar demographic CSV
+CENTROIDS_PATH = "data/india_states_centroid.csv" # state -> lat/lon CSV
 
 
 # ---------- DATA LOADING ----------
@@ -16,8 +17,9 @@ DATA_PATH = "data/biometric_updates.csv"  # put your CSV here
 @st.cache_data(ttl=300)
 def load_data(path_or_buffer) -> pd.DataFrame:
     """
-    Load Aadhaar demographic/biometric-update-style data and do basic cleaning.
-    Expected columns (lowercased):
+    Load Aadhaar demographic data and do basic cleaning.
+
+    Expected columns (case-insensitive, will be lowercased):
       - date
       - state
       - district
@@ -47,14 +49,10 @@ def load_data(path_or_buffer) -> pd.DataFrame:
         + pd.to_numeric(df["demo_age_17_"], errors="coerce").fillna(0)
     )
 
-    # Very simple derived dimensions for filters
-    df["age_group"] = "all"      # you can later split rows by age band
-    df["modality"] = "all"       # dataset is demographic, keep one category
-
     return df
 
 
-# ---------- HELPERS ----------
+# ---------- HELPERS (FILTERS + CHARTS) ----------
 
 def filter_data(df: pd.DataFrame,
                 state: str,
@@ -101,7 +99,7 @@ def time_series_chart(df: pd.DataFrame):
         daily,
         x="date",
         y="updates_count",
-        title="Updates over time (all modalities, all ages)",
+        title="Updates over time (all age bands)",
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -142,6 +140,51 @@ def district_bar_chart(df: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def state_map(df: pd.DataFrame):
+    """
+    Bubble heat map of India using state centroids and update counts.
+    Requires data/india_states_centroid.csv with columns: state,lat,lon.
+    """
+    if df.empty:
+        return
+
+    if not os.path.exists(CENTROIDS_PATH):
+        st.info(
+            "State centroid file not found: data/india_states_centroid.csv. "
+            "Add it to enable the map view."
+        )
+        return
+
+    # aggregate by state
+    s = (
+        df.groupby("state", as_index=False)["updates_count"]
+        .sum()
+        .sort_values("updates_count", ascending=False)
+    )
+
+    cent = pd.read_csv(CENTROIDS_PATH)
+    cent.columns = [c.strip().lower() for c in cent.columns]
+
+    merged = pd.merge(s, cent, on="state", how="inner")
+
+    if merged.empty:
+        st.info("No matching states between data and centroid file for map.")
+        return
+
+    fig = px.scatter_mapbox(
+        merged,
+        lat="lat",
+        lon="lon",
+        size="updates_count",
+        color="updates_count",
+        hover_name="state",
+        zoom=3.8,
+        mapbox_style="carto-positron",
+        title="Update intensity by state (bubble map)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ---------- STREAMLIT APP ----------
 
 st.set_page_config(
@@ -151,8 +194,8 @@ st.set_page_config(
 
 st.title("Aadhaar Biometric/Demographic Update Monitor")
 st.caption(
-    "Dashboard using Aadhaar demographic age-band counts to approximate "
-    "biometric update intensity across states and districts."
+    "Dashboard using Aadhaar age-band counts to approximate update intensity "
+    "across states and districts, with an India heat map."
 )
 
 
@@ -182,8 +225,7 @@ else:
 if df_raw.empty:
     st.error(
         "Dataset is empty or could not be loaded. "
-        "Check that the CSV has columns: date, state, district, pincode, "
-        "demo_age_5_17, demo_age_17_."
+        "CSV must have: date, state, district, pincode, demo_age_5_17, demo_age_17_."
     )
     st.stop()
 
@@ -231,6 +273,9 @@ with col_left:
 
 with col_right:
     district_bar_chart(df)
+
+st.subheader("Geographic view")
+state_map(df)
 
 st.subheader("Filtered data (preview)")
 st.dataframe(df.head(200))
